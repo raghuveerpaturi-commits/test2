@@ -106,15 +106,15 @@ def diagnose_image(filepath):
             print(f"     ✓ Found {len(faces_haar)} face(s)")
             for i, (x, y, w, h) in enumerate(faces_haar, 1):
                 print(f"       Face {i}: {w}x{h} pixels at ({x},{y})")
-        else:HOG for Jetson stability)
-            locations_to_use = face_locations_hog if face_locations_hog else face_locations
+        else:
+            print(f"     ✗ No faces detected")
         
         # Try encoding with different parameters
         if face_locations or face_locations_hog:
             print(f"\nFace Encoding Attempts:")
             
-            # Use detected locations (prefer CNN)
-            locations_to_use = face_locations if face_locations else face_locations_hog
+            # Use detected locations (prefer HOG for Jetson stability)
+            locations_to_use = face_locations_hog if face_locations_hog else face_locations
             
             # Attempt with large model
             print(f"  1. Large model...")
