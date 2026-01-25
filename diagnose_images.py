@@ -22,10 +22,23 @@ import cv2
 
 KNOWN_FACES_DIR = "known_faces"
 
-def load_image_with_orientation(image_path):
-    """Load image with proper EXIF orientation"""
+def load_image_with_orientation(image_path, max_size=800):
+    """Load image with proper EXIF orientation and resize for Jetson Nano
+    
+    Args:
+        image_path: Path to image
+        max_size: Maximum dimension (smaller for Jetson to avoid OOM)
+    """
     pil_image = Image.open(image_path)
     pil_image = ImageOps.exif_transpose(pil_image)
+    
+    # Resize if too large (critical for Jetson Nano memory limits)
+    width, height = pil_image.size
+    if max(width, height) > max_size:
+        ratio = max_size / max(width, height)
+        new_size = (int(width * ratio), int(height * ratio))
+        pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+        print(f"  Resized from {width}x{height} to {new_size[0]}x{new_size[1]} (GPU memory)")
     
     if pil_image.mode != 'RGB':
         pil_image = pil_image.convert('RGB')
@@ -53,25 +66,32 @@ def diagnose_image(filepath):
         # Try to detect faces with different models
         print(f"\nFace Detection Attempts:")
         
-        # Attempt 1: Default model
-        print(f"  1. Default model (CNN)...")
-        face_locations = face_recognition.face_locations(image, model='cnn')
-        if face_locations:
-            print(f"     ✓ Found {len(face_locations)} face(s)")
-            for i, (top, right, bottom, left) in enumerate(face_locations, 1):
+        # Attempt 1: HOG model first (faster, less memory, good for Jetson)
+        print(f"  1. HOG model (CPU, faster, less memory)...")
+        face_locations_hog = face_recognition.face_locations(image, model='hog')
+        if face_locations_hog:
+            print(f"     ✓ Found {len(face_locations_hog)} face(s)")
+            for i, (top, right, bottom, left) in enumerate(face_locations_hog, 1):
                 face_w = right - left
                 face_h = bottom - top
                 print(f"       Face {i}: {face_w}x{face_h} pixels at ({left},{top})")
         else:
             print(f"     ✗ No faces detected")
         
-        # Attempt 2: HOG model (faster but less accurate)
-        print(f"  2. HOG model (faster)...")
-        face_locations_hog = face_recognition.face_locations(image, model='hog')
-        if face_locations_hog:
-            print(f"     ✓ Found {len(face_locations_hog)} face(s)")
-        else:
-            print(f"     ✗ No faces detected")
+        # Attempt 2: CNN model (GPU, more accurate but memory intensive)
+        print(f"  2. CNN model (GPU, more accurate but memory intensive)...")
+        try:
+            face_locations = face_recognition.face_locations(image, model='cnn')
+            if face_locations:
+                print(f"     ✓ Found {len(face_locations)} face(s)")
+            else:
+                print(f"     ✗ No faces detected")
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                print(f"     ✗ GPU out of memory (image too large for Jetson)")
+                face_locations = []
+            else:
+                raise
         
         # Attempt 3: OpenCV Haar Cascade
         print(f"  3. OpenCV Haar Cascade...")
@@ -86,8 +106,8 @@ def diagnose_image(filepath):
             print(f"     ✓ Found {len(faces_haar)} face(s)")
             for i, (x, y, w, h) in enumerate(faces_haar, 1):
                 print(f"       Face {i}: {w}x{h} pixels at ({x},{y})")
-        else:
-            print(f"     ✗ No faces detected")
+        else:HOG for Jetson stability)
+            locations_to_use = face_locations_hog if face_locations_hog else face_locations
         
         # Try encoding with different parameters
         if face_locations or face_locations_hog:
