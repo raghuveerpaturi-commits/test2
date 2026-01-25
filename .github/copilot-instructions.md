@@ -7,15 +7,15 @@ Real-time face detection and recognition system optimized for **NVIDIA Jetson Na
 
 ### Core Detection Pipeline
 1. **VideoStream class** ([face_detection.py](face_detection.py#L22-L73)): Threaded video capture for RTSP streams, uses queue-based buffering to reduce latency
-2. **FaceDetector class** ([face_detection.py](face_detection.py#L265-L323)): Dual detection methods
+2. **FaceDetector class** ([face_detection.py](face_detection.py#L265-L338)): Dual detection methods
    - Haar Cascade (default): Fast, lower resource usage, good for embedded systems
    - DNN (optional): More accurate, requires model download, supports CUDA acceleration
 3. **FaceRecognizer class** ([face_detection.py](face_detection.py#L113-L263)): Multi-image voting system for identity verification
 
 ### Face Recognition Strategy
 - **Multiple images per person** (3-4 recommended): Each person can have multiple reference images (`name_1.jpg`, `name_2.jpg`, etc.)
-- **Voting algorithm** ([face_detection.py](face_detection.py#L222-L246)): Aggregates matches across all reference images using weighted average of face distances
-- **EXIF orientation handling** ([face_detection.py](face_detection.py#L76-L108)): `load_image_with_orientation()` auto-rotates phone/camera images using PIL
+- **Voting algorithm** ([face_detection.py](face_detection.py#L219-L256)): Aggregates matches across all reference images using weighted average of face distances
+- **EXIF orientation handling** ([face_detection.py](face_detection.py#L76-L109)): `load_image_with_orientation()` auto-rotates phone/camera images using PIL
 
 ## Critical Workflows
 
@@ -46,7 +46,7 @@ Use `diagnose_images.py` to test why specific images fail encoding:
 ### Performance Optimization Pattern
 Every detection parameter is tunable for Jetson's limited resources:
 ```python
-# Frame processing strategy: skip frames + scale down
+# Frame processing strategy: skip frames + scale down (face_detection.py#L421-L425)
 if args.skip_frames == 0 or frame_count % (args.skip_frames + 1) == 1:
     if args.scale != 1.0:
         process_frame = cv2.resize(frame, None, fx=args.scale, fy=args.scale)
@@ -54,10 +54,14 @@ if args.skip_frames == 0 or frame_count % (args.skip_frames + 1) == 1:
 Coordinates are scaled back to original frame size for drawing. This pattern is critical for real-time performance on embedded hardware.
 
 ### RTSP Stream Handling
-RTSP streams use **threaded capture** ([face_detection.py](face_detection.py#L22-L73)) to prevent frame buffering lag. Regular VideoCapture is used for USB cameras. Check for `rtsp://` prefix to decide.
+RTSP streams use **threaded capture** ([face_detection.py](face_detection.py#L22-L73)) to prevent frame buffering lag. Regular VideoCapture is used for USB cameras. Check for `rtsp://` prefix to decide:
+```python
+if source.startswith('rtsp'):
+    cap = VideoStream(source, buffer_size=1).start()
+```
 
 ### Threat Detection Colors
-Visual convention: Green box = known person, Red box = unknown/threat. Thickness also differs (2 vs 3) for quick visual identification.
+Visual convention ([face_detection.py](face_detection.py#L469-L471)): Green box = known person, Red box = unknown/threat. Thickness also differs (2 vs 3) for quick visual identification.
 
 ## Dependencies & Environment
 
@@ -67,10 +71,11 @@ Visual convention: Green box = known person, Red box = unknown/threat. Thickness
 - Basic detection works with just `opencv-python` and `numpy`
 
 ### CUDA Acceleration
-DNN detection auto-enables CUDA if available:
+DNN detection auto-enables CUDA if available ([face_detection.py](face_detection.py#L293-L296)):
 ```python
 if cv2.cuda.getCudaEnabledDeviceCount() > 0:
     self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+    self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
 ```
 
 ## Common Pitfalls

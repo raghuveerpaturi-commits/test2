@@ -258,6 +258,89 @@ class FaceRecognizer:
         return results
 
 
+class MotionDetector:
+    """Detect motion in video frames to filter out static objects"""
+    def __init__(self, threshold=25, min_area=500, history=500):
+        """
+        Initialize motion detector
+        Args:
+            threshold: Sensitivity threshold (lower=more sensitive, 15-50 recommended)
+            min_area: Minimum contour area to consider as motion (pixels)
+            history: Number of frames for background learning (higher=slower adaptation)
+        """
+        self.threshold = threshold
+        self.min_area = min_area
+        # Use MOG2 background subtractor (works well for stationary cameras)
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=history,
+            varThreshold=threshold,
+            detectShadows=False  # Disable shadow detection for better performance
+        )
+        self.motion_mask = None
+        
+    def detect_motion(self, frame):
+        """Detect motion regions in frame
+        Returns:
+            motion_mask: Binary mask where white = motion detected
+            motion_detected: Boolean if any significant motion found
+        """
+        # Apply background subtraction
+        fg_mask = self.bg_subtractor.apply(frame)
+        
+        # Clean up the mask
+        # Remove noise with morphological operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours to identify motion regions
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Create clean motion mask
+        motion_mask = np.zeros_like(fg_mask)
+        motion_detected = False
+        
+        for contour in contours:
+            if cv2.contourArea(contour) > self.min_area:
+                # Draw filled contour on motion mask
+                cv2.drawContours(motion_mask, [contour], -1, 255, -1)
+                motion_detected = True
+        
+        # Dilate motion regions to include nearby areas (catches full face)
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        motion_mask = cv2.dilate(motion_mask, kernel_dilate, iterations=2)
+        
+        self.motion_mask = motion_mask
+        return motion_mask, motion_detected
+    
+    def is_in_motion_region(self, x, y, w, h, margin=20):
+        """Check if a bounding box overlaps with motion regions
+        Args:
+            x, y, w, h: Bounding box coordinates
+            margin: Extra margin around box to check (pixels)
+        Returns:
+            True if box is in or near a motion region
+        """
+        if self.motion_mask is None:
+            return True  # If no motion mask, allow all detections
+        
+        # Check expanded region around the face
+        x1 = max(0, x - margin)
+        y1 = max(0, y - margin)
+        x2 = min(self.motion_mask.shape[1], x + w + margin)
+        y2 = min(self.motion_mask.shape[0], y + h + margin)
+        
+        # Extract region of interest from motion mask
+        roi = self.motion_mask[y1:y2, x1:x2]
+        
+        # If any pixels in ROI are white (motion), return True
+        motion_pixels = cv2.countNonZero(roi)
+        total_pixels = roi.shape[0] * roi.shape[1]
+        
+        # Require at least 5% of the region to have motion
+        return (motion_pixels / total_pixels) > 0.05 if total_pixels > 0 else False
+
+
 class FaceDetector:
     def __init__(self, method='haar', min_face_size=20):
         """
@@ -363,11 +446,27 @@ def main():
                         help='Enable face recognition (identify known vs unknown)')
     parser.add_argument('--min-face-size', type=int, default=20,
                         help='Minimum face size in pixels (lower=detect smaller/distant faces)')
+    parser.add_argument('--motion-detection', action='store_true',
+                        help='Enable motion detection to filter static objects (chairs, benches)')
+    parser.add_argument('--motion-threshold', type=int, default=25,
+                        help='Motion sensitivity (15-50, lower=more sensitive)')
+    parser.add_argument('--motion-min-area', type=int, default=500,
+                        help='Minimum motion area in pixels (reduce false positives)')
     
     args = parser.parse_args()
     
     # Initialize face detector
     detector = FaceDetector(method=args.method, min_face_size=args.min_face_size)
+    
+    # Initialize motion detector if enabled
+    motion_detector = None
+    if args.motion_detection:
+        motion_detector = MotionDetector(
+            threshold=args.motion_threshold,
+            min_area=args.motion_min_area
+        )
+        print(f"Motion detection enabled (threshold={args.motion_threshold}, min_area={args.motion_min_area})")
+        print("Static objects (chairs, benches) will be filtered out")
     
     # Initialize face recognizer if enabled
     recognizer = None
@@ -424,8 +523,20 @@ def main():
             else:
                 process_frame = frame
             
-            # Detect faces
-            detected_faces = detector.detect(process_frame, args.conf)
+            # Detect motion first (if enabled)
+            motion_mask = None
+            if motion_detector:
+                motion_mask, has_motion = motion_detector.detect_motion(process_frame)
+                if not has_motion:
+                    # No motion detected, skip face detection
+                    faces = []
+                    detected_faces = []
+                else:
+                    # Motion detected, proceed with face detection
+                    detected_faces = detector.detect(process_frame, args.conf)
+            else:
+                # No motion detection, always run face detection
+                detected_faces = detector.detect(process_frame, args.conf)
             
             # Scale face coordinates back to original frame size
             if args.scale != 1.0:
@@ -433,14 +544,35 @@ def main():
                 for face in detected_faces:
                     if args.method == 'haar':
                         x, y, w, h = face
-                        faces.append((int(x/args.scale), int(y/args.scale), 
-                                    int(w/args.scale), int(h/args.scale)))
+                        scaled_face = (int(x/args.scale), int(y/args.scale), 
+                                     int(w/args.scale), int(h/args.scale))
                     else:
                         x, y, w, h, conf = face
-                        faces.append((int(x/args.scale), int(y/args.scale), 
-                                    int(w/args.scale), int(h/args.scale), conf))
+                        scaled_face = (int(x/args.scale), int(y/args.scale), 
+                                     int(w/args.scale), int(h/args.scale), conf)
+                    
+                    # Filter by motion if enabled
+                    if motion_detector:
+                        x_check, y_check, w_check, h_check = scaled_face[:4]
+                        # Scale motion check back to process_frame size
+                        x_motion = int(x_check * args.scale)
+                        y_motion = int(y_check * args.scale)
+                        w_motion = int(w_check * args.scale)
+                        h_motion = int(h_check * args.scale)
+                        if motion_detector.is_in_motion_region(x_motion, y_motion, w_motion, h_motion):
+                            faces.append(scaled_face)
+                    else:
+                        faces.append(scaled_face)
             else:
-                faces = detected_faces
+                # No scaling, filter by motion if enabled
+                if motion_detector:
+                    faces = []
+                    for face in detected_faces:
+                        x, y, w, h = face[:4]
+                        if motion_detector.is_in_motion_region(x, y, w, h):
+                            faces.append(face)
+                else:
+                    faces = detected_faces
             
             # Recognize faces if enabled
             if recognizer and len(faces) > 0:
@@ -494,6 +626,25 @@ def main():
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f'FPS: {fps:.1f}', (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Show motion detection status
+        if motion_detector:
+            motion_text = "Motion: ON"
+            cv2.putText(frame, motion_text, (10, 90),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
+            # Optional: overlay motion mask (semi-transparent blue)
+            if motion_detector.motion_mask is not None:
+                # Resize motion mask to match display frame
+                if args.scale != 1.0:
+                    motion_overlay = cv2.resize(motion_detector.motion_mask, 
+                                              (frame.shape[1], frame.shape[0]))
+                else:
+                    motion_overlay = motion_detector.motion_mask
+                # Create blue overlay where motion is detected
+                motion_viz = np.zeros_like(frame)
+                motion_viz[:, :, 0] = motion_overlay  # Blue channel
+                # Blend with original frame (20% opacity)
+                frame = cv2.addWeighted(frame, 1.0, motion_viz, 0.2, 0)
         
         # Display frame
         cv2.imshow('Face Detection - Jetson Nano', frame)
