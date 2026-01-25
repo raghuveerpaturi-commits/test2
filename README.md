@@ -114,20 +114,45 @@ python3 face_detection.py --scale 0.5 --skip-frames 2 --width 640 --height 480
 
 ## Face Recognition Setup
 
-1. Create a directory for known faces (created automatically on first run)
-2. Add face images with naming format: `person_name.jpg`
-3. Run with `--recognize` flag
+### Adding Known Faces (3-4 Images Per Person Recommended)
+
+For best accuracy, add **multiple images** per person with varying conditions:
 
 ```bash
-# Example structure
+# Run setup helper
+python3 setup_known_faces.py
+
+# Example structure - Multiple images per person
 known_faces/
-  ├── john_doe.jpg
-  ├── jane_smith.jpg
-  └── authorized_person.jpg
+  ├── john_doe_1.jpg         # Front facing
+  ├── john_doe_2.jpg         # Slight angle
+  ├── john_doe_3.jpg         # With glasses
+  ├── jane_smith_1.jpg       # Smiling
+  ├── jane_smith_2.jpg       # Neutral expression
+  ├── jane_smith_3.jpg       # Different lighting
+  ├── raghuveer_paturi_1.jpg # Normal
+  ├── raghuveer_paturi_2.jpg # Side angle
+  ├── raghuveer_paturi_3.jpg # With accessories
+  └── raghuveer_paturi_4.jpg # Different time/lighting
 
 # Run with recognition
 python3 face_detection.py --recognize
 ```
+
+**Naming Convention:**
+- Format: `firstname_lastname_NUMBER.jpg`
+- Numbers can be `_1`, `_2`, `_3`, `_4`, etc.
+- All images with the same base name are treated as the same person
+- The system uses **voting** across all images for better accuracy
+
+**Image Tips:**
+- ✅ 3-4 images per person (optimal)
+- ✅ Vary angles slightly
+- ✅ Include with/without glasses, hats
+- ✅ Different lighting conditions
+- ✅ Clear, well-lit faces (300x300 pixels minimum)
+- ❌ Avoid blurry images
+- ❌ One face per image only
 
 **Detection Colors:**
 - 🟢 Green = Known/Authorized person

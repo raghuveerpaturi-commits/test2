@@ -91,15 +91,23 @@ class FaceRecognizer:
             os.makedirs(known_faces_dir)
             print(f"Created directory: {known_faces_dir}")
             print(f"Add known face images (jpg/png) to this directory")
-            print(f"Name format: person_name.jpg")
+            print(f"Name format: person_name_1.jpg, person_name_2.jpg, etc.")
+            print(f"Add 3-4 images per person for better accuracy")
             return
         
-        # Load known faces
+        # Load known faces - support multiple images per person
         print(f"Loading known faces from {known_faces_dir}...")
+        person_image_count = {}
+        
         for filename in os.listdir(known_faces_dir):
             if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                 path = os.path.join(known_faces_dir, filename)
-                name = os.path.splitext(filename)[0].replace('_', ' ').title()
+                
+                # Extract person name (remove _1, _2, etc. suffixes)
+                base_name = os.path.splitext(filename)[0]
+                # Remove trailing numbers like _1, _2, _3
+                import re
+                name = re.sub(r'_\d+$', '', base_name).replace('_', ' ').title()
                 
                 try:
                     image = face_recognition.load_image_file(path)
@@ -108,13 +116,19 @@ class FaceRecognizer:
                     if encodings:
                         self.known_face_encodings.append(encodings[0])
                         self.known_face_names.append(name)
-                        print(f"  ✓ Loaded: {name}")
+                        
+                        # Track count per person
+                        person_image_count[name] = person_image_count.get(name, 0) + 1
+                        print(f"  ✓ Loaded: {name} (image #{person_image_count[name]})")
                     else:
                         print(f"  ✗ No face found in: {filename}")
                 except Exception as e:
                     print(f"  ✗ Error loading {filename}: {e}")
         
-        print(f"Total known faces loaded: {len(self.known_face_names)}")
+        print(f"\nTotal encodings loaded: {len(self.known_face_encodings)}")
+        print(f"Unique persons: {len(set(self.known_face_names))}")
+        for person, count in sorted(person_image_count.items()):
+            print(f"  - {person}: {count} image(s)")
     
     def recognize_faces(self, frame, face_locations):
         """Recognize faces in the frame
@@ -140,7 +154,7 @@ class FaceRecognizer:
         
         results = []
         for face_encoding in face_encodings:
-            # Compare with known faces
+            # Compare with all known face encodings
             matches = face_recognition.compare_faces(
                 self.known_face_encodings, 
                 face_encoding, 
@@ -150,14 +164,45 @@ class FaceRecognizer:
             is_known = False
             
             if True in matches:
-                # Find best match
+                # Calculate distances to all encodings
                 face_distances = face_recognition.face_distance(
                     self.known_face_encodings, face_encoding
                 )
-                best_match_index = np.argmin(face_distances)
-                if matches[best_match_index]:
-                    name = self.known_face_names[best_match_index]
-                    is_known = True
+                
+                # Find all matching indices
+                matching_indices = [i for i, match in enumerate(matches) if match]
+                
+                if matching_indices:
+                    # Get the best match among all matches
+                    best_match_index = min(matching_indices, 
+                                         key=lambda i: face_distances[i])
+                    
+                    # Use voting: count which person appears most in matches
+                    person_votes = {}
+                    for idx in matching_indices:
+                        person = self.known_face_names[idx]
+                        distance = face_distances[idx]
+                        if person not in person_votes:
+                            person_votes[person] = []
+                        person_votes[person].append(distance)
+                    
+                    # Find person with most votes and best average distance
+                    best_person = None
+                    best_score = float('inf')
+                    
+                    for person, distances in person_votes.items():
+                        # Average distance for this person across all their images
+                        avg_distance = sum(distances) / len(distances)
+                        # Weight by number of matches (more matches = more confidence)
+                        score = avg_distance / (1 + len(distances) * 0.1)
+                        
+                        if score < best_score:
+                            best_score = score
+                            best_person = person
+                    
+                    if best_person:
+                        name = best_person
+                        is_known = True
             
             results.append((name, is_known))
         
