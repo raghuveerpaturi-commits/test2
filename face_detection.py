@@ -12,6 +12,7 @@ import threading
 import queue
 import os
 import numpy as np
+from datetime import datetime
 from PIL import Image, ImageOps
 try:
     import face_recognition
@@ -378,14 +379,14 @@ class FaceDetector:
         
         Optimized for detecting faces at various distances:
         - scaleFactor=1.05: Finer steps for better small face detection
-        - minNeighbors=3: More lenient (lower = more detections but more false positives)
+        - minNeighbors=4: Stricter to reduce false positives (chairs, tables)
         - minSize: Configurable minimum to catch distant faces
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(
             gray,
             scaleFactor=1.05,
-            minNeighbors=3,
+            minNeighbors=4,  # Increased from 3 to reduce false positives
             minSize=(self.min_face_size, self.min_face_size)
         )
         return faces
@@ -413,12 +414,58 @@ class FaceDetector:
         
         return faces
     
+    def filter_faces(self, faces, frame_width, frame_height):
+        """Filter detected faces to reduce false positives
+        
+        Filters based on:
+        - Aspect ratio (faces should be roughly square)
+        - Minimum size (too small = noise)
+        - Maximum size (too large = likely not a face)
+        """
+        filtered = []
+        
+        for face in faces:
+            if self.method == 'haar':
+                x, y, w, h = face
+                conf = 1.0
+            else:
+                x, y, w, h, conf = face
+            
+            # Check aspect ratio (faces are roughly square: 0.7 to 1.5)
+            aspect_ratio = w / h if h > 0 else 0
+            if aspect_ratio < 0.7 or aspect_ratio > 1.5:
+                continue  # Skip - chairs/tables often have wrong aspect ratio
+            
+            # Check minimum face size (at least 30x30 pixels after scaling)
+            if w < 30 or h < 30:
+                continue  # Too small - likely noise
+            
+            # Check maximum face size (not more than 80% of frame)
+            max_size = min(frame_width, frame_height) * 0.8
+            if w > max_size or h > max_size:
+                continue  # Too large - likely false positive
+            
+            # Check face position (should not be at extreme edges)
+            if x < 5 or y < 5 or x + w > frame_width - 5 or y + h > frame_height - 5:
+                continue  # At edge - likely partial detection
+            
+            filtered.append(face)
+        
+        return filtered
+    
     def detect(self, frame, conf_threshold=0.5):
-        """Detect faces using the selected method"""
+        """Detect faces using the selected method with filtering"""
+        frame_height, frame_width = frame.shape[:2]
+        
         if self.method == 'haar':
-            return self.detect_faces_haar(frame)
+            faces = self.detect_faces_haar(frame)
         else:
-            return self.detect_faces_dnn(frame, conf_threshold)
+            faces = self.detect_faces_dnn(frame, conf_threshold)
+        
+        # Apply filtering to reduce false positives
+        filtered_faces = self.filter_faces(faces, frame_width, frame_height)
+        
+        return filtered_faces
 
 
 def main():
@@ -452,6 +499,16 @@ def main():
                         help='Motion sensitivity (15-50, lower=more sensitive)')
     parser.add_argument('--motion-min-area', type=int, default=500,
                         help='Minimum motion area in pixels (reduce false positives)')
+    parser.add_argument('--capture-threats', action='store_true',
+                        help='Auto-capture images when threats detected (RECOMMENDED for debugging false positives)')
+    parser.add_argument('--threat-threshold', type=int, default=1,
+                        help='Number of threats to trigger capture (default: 1)')
+    parser.add_argument('--capture-dir', type=str, default='threat_captures',
+                        help='Directory to save captured threat images')
+    parser.add_argument('--capture-cooldown', type=int, default=5,
+                        help='Seconds between captures to avoid duplicates')
+    parser.add_argument('--min-detections', type=int, default=1,
+                        help='Minimum consecutive detections before considering valid face (reduces false positives)')
     
     args = parser.parse_args()
     
@@ -467,6 +524,17 @@ def main():
         )
         print(f"Motion detection enabled (threshold={args.motion_threshold}, min_area={args.motion_min_area})")
         print("Static objects (chairs, benches) will be filtered out")
+    
+    # Setup threat capture if enabled
+    last_capture_time = 0
+    capture_count = 0
+    if args.capture_threats:
+        if not os.path.exists(args.capture_dir):
+            os.makedirs(args.capture_dir)
+            print(f"Created threat capture directory: {args.capture_dir}/")
+        print(f"Auto-capture enabled: Will save images when {args.threat_threshold}+ threat(s) detected")
+        print(f"Captures saved to: {os.path.abspath(args.capture_dir)}/")
+        print(f"Cooldown: {args.capture_cooldown}s between captures")
     
     # Initialize face recognizer if enabled
     recognizer = None
@@ -506,6 +574,10 @@ def main():
     fps = 0
     frame_count = 0
     faces = []  # Cache faces for skipped frames
+    
+    # Face detection stability tracking (reduce false positives)
+    face_detection_history = {}  # key: (x, y, w, h), value: count
+    detection_threshold = args.min_detections
     
     while True:
         ret, frame = cap.read()
@@ -574,6 +646,29 @@ def main():
                 else:
                     faces = detected_faces
             
+            # Apply detection stability filter (reduce transient false positives)
+            if detection_threshold > 1:
+                stable_faces = []
+                for face in faces:
+                    x, y, w, h = face[:4]
+                    # Create a region key (rounded to reduce noise)
+                    region_key = (round(x / 20) * 20, round(y / 20) * 20, round(w / 20) * 20, round(h / 20) * 20)
+                    
+                    # Increment detection count
+                    face_detection_history[region_key] = face_detection_history.get(region_key, 0) + 1
+                    
+                    # Only include if detected enough times
+                    if face_detection_history[region_key] >= detection_threshold:
+                        stable_faces.append(face)
+                
+                # Clean old entries (keep only last 100 regions)
+                if len(face_detection_history) > 100:
+                    # Keep only the most recent detections
+                    sorted_keys = sorted(face_detection_history.items(), key=lambda x: x[1], reverse=True)
+                    face_detection_history = dict(sorted_keys[:100])
+                
+                faces = stable_faces
+            
             # Recognize faces if enabled
             if recognizer and len(faces) > 0:
                 # Extract just locations for recognition
@@ -582,6 +677,38 @@ def main():
                 face_identities = recognizer.recognize_faces(frame, face_locations)
             else:
                 face_identities = [("Unknown", False)] * len(faces)
+            
+            # Check for threats and capture if enabled
+            if args.capture_threats and len(faces) > 0:
+                threat_count = sum(1 for _, is_known in face_identities if not is_known)
+                current_time = time.time()
+                
+                # Capture if threshold met and cooldown expired
+                if (threat_count >= args.threat_threshold and 
+                    current_time - last_capture_time >= args.capture_cooldown):
+                    
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"threat_{timestamp}_{threat_count}threats.jpg"
+                    filepath = os.path.join(args.capture_dir, filename)
+                    
+                    # Save full-resolution frame with bounding boxes drawn
+                    capture_frame = frame.copy()
+                    
+                    # Draw detections on capture for easy review
+                    for idx_cap, face_cap in enumerate(faces):
+                        x_cap, y_cap, w_cap, h_cap = face_cap[:4]
+                        name_cap, is_known_cap = face_identities[idx_cap] if idx_cap < len(face_identities) else ("Unknown", False)
+                        color_cap = (0, 255, 0) if is_known_cap else (0, 0, 255)
+                        cv2.rectangle(capture_frame, (x_cap, y_cap), (x_cap+w_cap, y_cap+h_cap), color_cap, 3)
+                        cv2.putText(capture_frame, name_cap, (x_cap, y_cap-10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_cap, 2)
+                    
+                    cv2.imwrite(filepath, capture_frame)
+                    
+                    capture_count += 1
+                    last_capture_time = current_time
+                    print(f"⚠ THREAT CAPTURED [{capture_count}]: {filename} ({threat_count} threat(s))")
+                    print(f"   → Saved with bounding boxes: {os.path.abspath(filepath)}")
         
         # Draw rectangles around faces
         for idx, face in enumerate(faces):
@@ -632,6 +759,15 @@ def main():
             motion_text = "Motion: ON"
             cv2.putText(frame, motion_text, (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
+        
+        # Show capture status if enabled
+        if args.capture_threats:
+            # Count current threats
+            threat_count = sum(1 for _, is_known in face_identities if not is_known)
+            capture_text = f"Captures: {capture_count} | Threats: {threat_count}"
+            color = (0, 0, 255) if threat_count >= args.threat_threshold else (0, 255, 0)
+            cv2.putText(frame, capture_text, (10, 120),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             # Optional: overlay motion mask (semi-transparent blue)
             if motion_detector.motion_mask is not None:
                 # Resize motion mask to match display frame
