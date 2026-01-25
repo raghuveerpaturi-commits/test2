@@ -259,13 +259,15 @@ class FaceRecognizer:
 
 
 class FaceDetector:
-    def __init__(self, method='haar'):
+    def __init__(self, method='haar', min_face_size=20):
         """
         Initialize face detector
         Args:
             method: 'haar' for Haar Cascade or 'dnn' for DNN-based detection
+            min_face_size: Minimum face size to detect (smaller = catch distant faces)
         """
         self.method = method
+        self.min_face_size = min_face_size
         
         if method == 'haar':
             # Load Haar Cascade classifier (faster, good for Jetson Nano)
@@ -289,13 +291,19 @@ class FaceDetector:
                 exit(1)
     
     def detect_faces_haar(self, frame):
-        """Detect faces using Haar Cascade"""
+        """Detect faces using Haar Cascade
+        
+        Optimized for detecting faces at various distances:
+        - scaleFactor=1.05: Finer steps for better small face detection
+        - minNeighbors=3: More lenient (lower = more detections but more false positives)
+        - minSize: Configurable minimum to catch distant faces
+        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(
             gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(30, 30)
+            scaleFactor=1.05,
+            minNeighbors=3,
+            minSize=(self.min_face_size, self.min_face_size)
         )
         return faces
     
@@ -353,11 +361,13 @@ def main():
                         help='Face recognition tolerance (lower=stricter, 0.6=default)')
     parser.add_argument('--recognize', action='store_true',
                         help='Enable face recognition (identify known vs unknown)')
+    parser.add_argument('--min-face-size', type=int, default=20,
+                        help='Minimum face size in pixels (lower=detect smaller/distant faces)')
     
     args = parser.parse_args()
     
     # Initialize face detector
-    detector = FaceDetector(method=args.method)
+    detector = FaceDetector(method=args.method, min_face_size=args.min_face_size)
     
     # Initialize face recognizer if enabled
     recognizer = None
