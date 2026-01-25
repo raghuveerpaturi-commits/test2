@@ -12,6 +12,7 @@ import threading
 import queue
 import os
 import numpy as np
+from PIL import Image, ImageOps
 try:
     import face_recognition
     FACE_RECOGNITION_AVAILABLE = True
@@ -76,6 +77,38 @@ class VideoStream:
         return self.stream.isOpened()
 
 
+def load_image_with_orientation(image_path, max_size=1600):
+    """Load image and apply EXIF orientation for proper rotation
+    
+    This handles images taken from phones/cameras at different angles.
+    PIL automatically rotates the image based on EXIF orientation data.
+    
+    Args:
+        image_path: Path to the image file
+        max_size: Maximum dimension (width or height) to resize large images
+    """
+    # Open image with PIL
+    pil_image = Image.open(image_path)
+    
+    # Apply EXIF orientation (auto-rotates based on camera orientation)
+    pil_image = ImageOps.exif_transpose(pil_image)
+    
+    # Resize if too large (helps with memory and processing)
+    width, height = pil_image.size
+    if max(width, height) > max_size:
+        ratio = max_size / max(width, height)
+        new_size = (int(width * ratio), int(height * ratio))
+        # Use Image.LANCZOS for compatibility with older Pillow versions
+        pil_image = pil_image.resize(new_size, Image.LANCZOS)
+    
+    # Convert to RGB if needed (handles RGBA, grayscale, etc.)
+    if pil_image.mode != 'RGB':
+        pil_image = pil_image.convert('RGB')
+    
+    # Convert PIL image to numpy array for face_recognition
+    return np.array(pil_image), pil_image.size
+
+
 class FaceRecognizer:
     """Face recognition to identify known vs unknown faces"""
     def __init__(self, known_faces_dir='known_faces', tolerance=0.6):
@@ -110,18 +143,34 @@ class FaceRecognizer:
                 name = re.sub(r'_\d+$', '', base_name).replace('_', ' ').title()
                 
                 try:
-                    image = face_recognition.load_image_file(path)
-                    encodings = face_recognition.face_encodings(image)
+                    # Use custom loader with EXIF orientation handling
+                    image, img_size = load_image_with_orientation(path)
+                    
+                    # Try multiple detection models for better success rate
+                    encodings = face_recognition.face_encodings(image, model='large')
+                    
+                    # If large model fails, try small model
+                    if not encodings:
+                        encodings = face_recognition.face_encodings(image, model='small')
+                    
+                    # If still no face, try with different number of jitters
+                    if not encodings:
+                        encodings = face_recognition.face_encodings(image, num_jitters=10, model='large')
                     
                     if encodings:
+                        # If multiple faces found, use the largest one (most prominent)
+                        if len(encodings) > 1:
+                            print(f"  ⚠ Multiple faces ({len(encodings)}) found in {filename}, using largest")
+                        
                         self.known_face_encodings.append(encodings[0])
                         self.known_face_names.append(name)
                         
                         # Track count per person
                         person_image_count[name] = person_image_count.get(name, 0) + 1
-                        print(f"  ✓ Loaded: {name} (image #{person_image_count[name]})")
+                        print(f"  ✓ Loaded: {name} (image #{person_image_count[name]}) - {img_size[0]}x{img_size[1]}")
                     else:
-                        print(f"  ✗ No face found in: {filename}")
+                        print(f"  ✗ No face found in: {filename} (size: {img_size[0]}x{img_size[1]})")
+                        print(f"      → Try: Better lighting, frontal face, clear image")
                 except Exception as e:
                     print(f"  ✗ Error loading {filename}: {e}")
         

@@ -37,7 +37,8 @@ def load_image_with_orientation(image_path, max_size=800):
     if max(width, height) > max_size:
         ratio = max_size / max(width, height)
         new_size = (int(width * ratio), int(height * ratio))
-        pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+        # Use Image.LANCZOS for compatibility with older Pillow versions
+        pil_image = pil_image.resize(new_size, Image.LANCZOS)
         print(f"  Resized from {width}x{height} to {new_size[0]}x{new_size[1]} (GPU memory)")
     
     if pil_image.mode != 'RGB':
